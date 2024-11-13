@@ -1,5 +1,4 @@
 from typing import Any
-
 import requests
 from benchling_sdk.models import ArchiveRecord as BenchlingArchiveRecord
 from benchling_sdk.models import Dropdown, DropdownOption, DropdownSummary
@@ -17,35 +16,35 @@ class ArchiveRecord(BaseModel):
 
 
 def get_benchling_dropdown_id_name_map(
-    benchling_service: BenchlingService,
+    benchling_service: BenchlingService, registry_id: str
 ) -> dict[str, str]:
-    return {d.id: d.name for d in get_benchling_dropdown_summaries(benchling_service)}
+    return {d.id: d.name for d in get_benchling_dropdown_summaries(benchling_service, registry_id)}
 
 
 def get_benchling_dropdown_summaries(
-    benchling_service: BenchlingService,
+    benchling_service: BenchlingService, registry_id: str
 ) -> list[DropdownSummary]:
     return [
         dropdown
-        for sublist in benchling_service.dropdowns.list()
+        for sublist in benchling_service.dropdowns.list(registry_id=registry_id)
         for dropdown in sublist
     ]
 
 
 def get_benchling_dropdown_summary_by_name(
-    benchling_service: BenchlingService, name: str
+    benchling_service: BenchlingService, registry_id: str, name: str
 ) -> DropdownSummary:
-    for dropdown in get_benchling_dropdown_summaries(benchling_service):
+    for dropdown in get_benchling_dropdown_summaries(benchling_service, registry_id):
         if dropdown.name == name:
             return dropdown
     raise Exception(f"Dropdown {name} not found in given list.")
 
 
 def get_benchling_dropdown_by_name(
-    benchling_service: BenchlingService, name: str
+    benchling_service: BenchlingService, registry_id: str, name: str
 ) -> Dropdown:
     dropdown = None
-    for d in get_benchling_dropdown_summaries(benchling_service):
+    for d in get_benchling_dropdown_summaries(benchling_service, registry_id):
         if d.name == name:
             dropdown = d
     if dropdown is None:
@@ -56,20 +55,19 @@ def get_benchling_dropdown_by_name(
 
 
 def get_benchling_dropdowns_dict(
-    benchling_service: BenchlingService,
-    include_archived: bool = False,
+    benchling_service: BenchlingService, registry_id: str, include_archived: bool = False
 ) -> dict[str, Dropdown]:
     def _convert_dropdown_from_json(
         d: dict[str, Any], include_archived: bool = False
     ) -> Dropdown:
-        all_options = d["allSchemaFieldSelectorOptions"]
+        all_options = d.get("allSchemaFieldSelectorOptions", [])
         if not include_archived:
-            all_options = [o for o in all_options if not o["archiveRecord"]]
+            all_options = [o for o in all_options if not o.get("archiveRecord")]
         return Dropdown(
             id=d["id"],
             name=d["name"],
             archive_record=BenchlingArchiveRecord(reason=d["archiveRecord"]["purpose"])
-            if d["archiveRecord"]
+            if d.get("archiveRecord")
             else None,
             options=[
                 DropdownOption(
@@ -78,7 +76,7 @@ def get_benchling_dropdowns_dict(
                     archive_record=BenchlingArchiveRecord(
                         reason=o["archiveRecord"]["purpose"]
                     )
-                    if o["archiveRecord"]
+                    if o.get("archiveRecord")
                     else None,
                 )
                 for o in all_options
@@ -87,15 +85,30 @@ def get_benchling_dropdowns_dict(
 
     with requests.Session() as session:
         request = session.get(
-            f"https://{benchling_service.benchling_tenant}.benchling.com/1/api/schema-field-selectors/?registryId={benchling_service.registry_id}",
+            f"https://{benchling_service.benchling_tenant}.benchling.com/1/api/schema-field-selectors/?registryId={registry_id}",
             headers=benchling_service.custom_post_headers,
             cookies=benchling_service.custom_post_cookies,
         )
-        all_dropdowns = request.json()["selectorsByRegistryId"][
-            benchling_service.registry_id
-        ]
+
+        # Improved error handling
+        if request.status_code != 200:
+            print("Error fetching dropdown data:", request.status_code, request.text)
+            raise ValueError(f"Failed to retrieve data: {request.status_code}")
+
+        response_data = request.json()
+        
+        if "selectorsByRegistryId" not in response_data:
+            raise KeyError(f"'selectorsByRegistryId' not found in response.")
+        
+        registry_data = response_data["selectorsByRegistryId"].get(registry_id)
+        
+        if registry_data is None:
+            raise KeyError(f"Registry ID '{registry_id}' not found in response data.")
+
+        all_dropdowns = registry_data
         if not include_archived:
-            all_dropdowns = [d for d in all_dropdowns if not d["archiveRecord"]]
+            all_dropdowns = [d for d in all_dropdowns if not d.get("archiveRecord")]
+
     dropdowns = {
         d["name"]: _convert_dropdown_from_json(d, include_archived)
         for d in all_dropdowns
@@ -104,9 +117,9 @@ def get_benchling_dropdowns_dict(
 
 
 def dropdown_exists_in_benchling(
-    benchling_service: BenchlingService, name: str
+    benchling_service: BenchlingService, registry_id: str, name: str
 ) -> bool:
-    return name in get_benchling_dropdown_summaries(benchling_service)
+    return name in get_benchling_dropdown_summaries(benchling_service, registry_id)
 
 
 def get_schemas_with_dropdown(dropdown_name: str) -> list[str]:
